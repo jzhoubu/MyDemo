@@ -1,0 +1,537 @@
+---
+title: "log2_xgboost"
+author: "周嘉玮"
+date: "2017年6月8日"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, echo=FALSE,eval=FALSE}
+#knitr::opts_chunk$set(echo = F,warning=F)
+```
+
+
+```{r library, include=FALSE}
+require(corrplot)
+require(psych)
+require(Cairo)
+library(tidyverse)
+library(dplyr)
+library(Information)
+library(gridExtra)
+library(plotROC)
+library(stringr)
+library(pROC)
+library(DT)
+library(xgboost)
+library(data.table)
+library(smbinning)
+library(Information)
+library(RColorBrewer)
+```
+
+
+```{r message=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+source('tools//bar.R')
+source('tools//xgb.cv.plot.R')
+source('tools//na.plot.R')
+```
+
+
+
+## 1.Load Data
+```{r, load data1,include=FALSE}
+load("data//data1.RData")
+```
+
+```{r na.plot}
+na.plot(data1)
+```
+
+
+## 2.Roughly XGB
+```{r xgb.DMatrix, include=FALSE}
+#colnames(data1)
+train=select(data1,-c(y,CONTACT_ADDRESS_DETAIL_Value,ext_id,hx_id,creation_date,ABODE_STATE_Value,ID_CARD))
+train$GENDER_Value_ID_CARD=ifelse(train$GENDER_Value_ID_CARD=="M",1,0)
+train=apply(train,2,as.numeric)%>%as.matrix()
+labels=as.numeric(data1$y)%>%as.matrix()
+
+dtrain <- xgb.DMatrix(train, label = data1$y,missing=NA)
+```
+
+```{r model xgb, eval=FALSE, include=FALSE}
+#head(train)
+xgb1 <- xgboost(data = dtrain, max.depth = 4,missing=NA,  
+               eta = 1, nthread = 2, nround = 10,objective = "binary:logistic") 
+save(xgb1,file="model//xgb1.RData")
+```
+
+```{r model Load, include=FALSE}
+load("model//xgb1.RData")
+```
+
+### 2.1 ks value
+```{r KS & Add xgb1 iterator, echo=FALSE, message=FALSE, warning=FALSE}
+y_hat=predict(xgb1,newdata=as.matrix(train),missing=NA)
+ks.test(y_hat[which(data1$y==1)],y_hat[which(data1$y==0)])
+
+#auc(data1$y, y_hat)  #0.6873
+```
+
+### 2.2 Importance of Feature
+```{r important feature, echo=FALSE}
+importanceRaw <- xgb.importance(colnames(train), model = xgb1)
+xgb.plot.importance(importanceRaw)
+#ggplot(importanceRaw,aes(x=reorder(Feature,Gain),y=Gain))+
+#  geom_bar(stat="identity",fill="red")+
+#  theme(axis.text.x= element_text(angle = 90,hjust = 1),axis.title.x=NULL)+
+#  theme_dark()+
+#  xlab(NULL)+
+#  ylab(NULL)+
+#  labs(title="importance of feature")+
+#  coord_flip()
+
+```
+
+
+
+[从集成学习到模型的偏差和方差的理解](http://blog.csdn.net/xmu_jupiter/article/details/47314927)  
+
+### 2.3 XGB_CV {.tabset}
+```{r xgb.cv, eval=FALSE, include=FALSE}
+history <- xgb.cv(data = dtrain, nround=100, nthread = 2, nfold = 10, metrics=list("auc","rmse","error"),
+                  max.depth =6, eta = 1, objective = "binary:logistic")
+history=history%>%data.frame
+save(history,file="data//history.RData")
+
+```
+
+```{r plot, echo=FALSE, message=FALSE, warning=FALSE}
+load("data//history.RData")
+```
+
+#### AUC
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history,"auc")
+```
+
+#### RMSE
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history,"rmse")
+```
+
+#### ERROR
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history,"error")
+```
+
+
+
+### 图像分析
+- nround选为6，因为再往上加验证集也无明显提升，训练集也开始出现过拟合。
+- 训练集方差小，验证集方差较大，但不过分。模型复杂度合适。
+- 目前大方向：
+    - 构造变量
+    - 进行迭代
+    - balanced
+
+
+
+
+## 3.Feature Engineering
+
+### 3.1 City Feature
+```{r fix cityname, eval=FALSE, include=FALSE}
+#解决input string 1 is invalid in this locale的问题
+#Sys.setlocale(locale="C")
+
+data1=data.table(data1)
+data1$ABODE_STATE_Value[which(data1$ABODE_STATE_Value=="广西")]="广西省"
+
+cityname=data1$ABODE_STATE_Value%>%unique
+#cityname
+```
+
+```{r add GPD&bad_ratio from internet, eval=FALSE, include=FALSE}
+#2015 31省不良率  
+#http://www.sohu.com/a/110107248_151848
+X=data.table(ABODE_STATE_Value=cityname)
+X=mutate(X,perGDP=c(11417,6742,12843,13123,32142,15056,19363,14733,11708,16143,27148
+,14011,12204,9527,9459,11180,18463,17211,24645,32985,23663,13361,35730,12695,12809,16164,25558,7972,11567,NA))
+X=mutate(X,perGPD_order=rank(X$perGDP))
+X=mutate(X,bad_ratio=c(2.18,1.6,1.99,1.67,1.43,1.48,1.18,1.58,2,2.34,2.32,0.99,2.08,1.13,2.18,
+                       1.86,1.72,1.47,1.64,1.55,2.77,1.67,2.5,1.58,1.9,1,3.97,1.6,0.23,NA))
+```
+
+```{r Add bad_ratio from swipal, eval=FALSE, include=FALSE}
+temp_good=data1[y==0,.N,by=.(ABODE_STATE_Value)]%>%data.table()
+temp_bad=data1[y==1,.N,by=.(ABODE_STATE_Value)]%>%data.table()
+temp=merge(temp_good,temp_bad,by="ABODE_STATE_Value")
+temp=temp%>%
+  mutate(bad_ratio_swipal=N.y/(N.y+N.x))%>%
+  select(ABODE_STATE_Value,bad_ratio_swipal)
+
+X=merge(X,temp,by="ABODE_STATE_Value")
+```
+
+```{r merge data2, eval=FALSE, include=FALSE}
+data2=merge(data1,X,by="ABODE_STATE_Value")%>%
+  data.table()
+
+save(data2,file="data//data2.RData")
+save(X,file="data//City_Feature.RData")
+```
+
+### Data2 {.tabset}
+- 修复“广西”、“广西省”名字歧义问题
+- 针对地区追加网上的信息：
+    - 地区人均GDP以及相应排名
+    - [2015年商业银行地区不良率](http://www.sohu.com/a/110107248_151848)
+    - 花薪的对应地区历史逾期率
+- 追加xgb1的迭代特征
+
+```{r Load data2, include=FALSE}
+load("data//data2.RData")
+load("data//City_Feature.RData")
+```
+
+```{r peek at City Feature, echo=FALSE, message=FALSE, warning=FALSE}
+X%>%datatable(style="bootstrap",class="table-condensed",options = list(dom = 'tp',scrollX = T))
+```
+
+```{r data2.cv-->history2, eval=FALSE, include=FALSE}
+train2=select(data2,-c(xgb1,y,CONTACT_ADDRESS_DETAIL_Value,ext_id,hx_id,creation_date,ABODE_STATE_Value,ID_CARD))
+train2$GENDER_Value_ID_CARD=ifelse(train2$GENDER_Value_ID_CARD=="M",1,0)
+train2=apply(train2,2,as.numeric)%>%as.matrix()
+dtrain2=xgb.DMatrix(data=train2,label = as.matrix(data2$y),missing=NA)
+history2 <- xgb.cv(data = dtrain2, nround=100, nthread = 2, nfold = 10, metrics=list("auc","rmse","error"),
+                  max.depth =6, eta = 1, objective = "binary:logistic")
+history2=history2%>%data.frame
+save(history2,file="data//history2.RData")
+```
+
+```{r data2.cv-->history2_xgb1, eval=FALSE, include=FALSE}
+train2=select(data2,-c(y,CONTACT_ADDRESS_DETAIL_Value,ext_id,hx_id,creation_date,ABODE_STATE_Value,ID_CARD))
+train2$GENDER_Value_ID_CARD=ifelse(train2$GENDER_Value_ID_CARD=="M",1,0)
+train2=apply(train2,2,as.numeric)%>%as.matrix()
+dtrain2=xgb.DMatrix(data=train2,label = as.matrix(data2$y),missing=NA)
+history2_xgb1 <- xgb.cv(data = dtrain2, nround=100, nthread = 2, nfold = 10, metrics=list("auc","rmse","error"),
+                  max.depth =6, eta = 1, objective = "binary:logistic")
+history2_xgb1=history2_xgb1%>%data.frame
+save(history2_xgb1,file="data//history2_xgb1.RData")
+```
+
+
+
+
+```{r xgb.cv.plot for data2, echo=FALSE, message=FALSE, warning=FALSE}
+load("data//history2.RData")
+load("data//history2_xgb1.RData")
+```
+
+#### AUC
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history2,"auc")
+```
+
+#### RMSE
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history2,"rmse")
+```
+
+#### ERROR
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history2,"error")
+```
+
+#### AUC_xgb1
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history2_xgb1,"auc")
+```
+
+#### RMSE_xgb1
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history2_xgb1,"rmse")
+```
+
+#### ERROR_xgb1
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history2_xgb1,"error")
+```
+
+
+
+### 图像分析
+- AUC up，AUC方差up
+- RMSE,ERROR down，方差基本不变
+
+
+### 3.2 Time Feature
+```{r work2loan with 13751_NA, eval=FALSE, include=FALSE}
+data3=data2%>%
+  mutate(work2loan=as.numeric(creation_date-WORK_TIME_Value))
+```
+
+```{r 时间滑动窗口 sofar to 2017.06.01, eval=FALSE, include=FALSE}
+today <- as.Date("2017-06-01")
+data3=data3%>%
+  mutate(sofar=12*year(today)-12*year(creation_date)+month(today)-month(creation_date))
+```
+
+```{r worktime, eval=FALSE, include=FALSE}
+today <- as.Date("2017-06-01")
+data3=data3%>%
+  mutate(worktime=as.numeric(today-WORK_TIME_Value))
+```
+
+```{r weekdays weekend, message=FALSE, warning=FALSE, include=FALSE,eval=FALSE}
+data3=data3%>%
+  mutate(weekdays=weekdays(creation_date))
+
+data3$weekend=ifelse(data3$weekdays==c("星期六","星期日"),1,0)
+```
+
+```{r month day, include=FALSE,eval=FALSE}
+data3=data3%>%
+  mutate(month=month(creation_date))%>%
+  mutate(quarter=quarters(creation_date))
+```
+
+```{r age2worktime age_worktime_ratio,message=FALSE, warning=FALSE, include=FALSE,eval=FALSE}
+data3$AGE_Value=data3$AGE_Value%>%as.numeric()
+data3=data3%>%
+  mutate(age2worktime=(AGE_Value-16)*365-worktime)%>%
+  mutate(age_worktime_ratio=worktime/AGE_Value)
+
+```
+
+```{r data3 save, eval=FALSE, include=FALSE}
+save(data3,file="data//data3.RData")
+```
+
+```{r data3 Load, include=FALSE}
+load("data//data3.RData")
+```
+
+```{r data3-->history3_xgb1, eval=FALSE, include=FALSE}
+train3=select(data3,-c(y,CONTACT_ADDRESS_DETAIL_Value,ext_id,hx_id,creation_date,ABODE_STATE_Value,ID_CARD))
+train3$GENDER_Value_ID_CARD=ifelse(train3$GENDER_Value_ID_CARD=="M",1,0)
+train3=apply(train3,2,as.numeric)%>%as.matrix()
+dtrain3=xgb.DMatrix(data=train3,label = as.matrix(data3$y),missing=NA)
+
+history3 <- xgb.cv(data = dtrain3, nround=100, nthread = 2, nfold = 10, metrics=list("auc","rmse","error"),
+                  max.depth =6, eta = 1, objective = "binary:logistic")
+history3_xgb1=history3%>%data.frame
+save(history3_xgb1,file="data//history3_xgb1.RData")
+```
+
+```{r data3-->history3, eval=FALSE, include=FALSE}
+train3=select(data3,-c(xgb1,y,CONTACT_ADDRESS_DETAIL_Value,ext_id,hx_id,creation_date,ABODE_STATE_Value,ID_CARD))
+train3$GENDER_Value_ID_CARD=ifelse(train3$GENDER_Value_ID_CARD=="M",1,0)
+train3=apply(train3,2,as.numeric)%>%as.matrix()
+dtrain3=xgb.DMatrix(data=train3,label = as.matrix(data3$y),missing=NA)
+
+history3 <- xgb.cv(data = dtrain3, nround=100, nthread = 2, nfold = 10, metrics=list("auc","rmse","error"),
+                  max.depth =6, eta = 1, objective = "binary:logistic")
+history3=history3%>%data.frame
+save(history3,file="data//history3.RData")
+```
+
+
+
+
+
+
+### Data3 {.tabset}
+- 增加变量work2loan
+- 增加时间窗口sofar，计算订单生成到今年六月的时间差，units是月份
+- 增加worktime
+- 增加weekdays,weekend,month,day字段
+- 增加age/worktime的复合字段(age2worktime,age_worktime_ratio)
+
+```{r xgb.cv.plot for data3, echo=FALSE}
+load("data//history3.RData")
+load("data//history3_xgb1.RData")
+```
+
+#### AUC
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history3,"auc")
+```
+
+#### RMSE
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history3,"rmse")
+```
+
+#### ERROR
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history3,"error")
+```
+
+#### AUC_xgb1
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history3_xgb1,"auc")
+```
+
+#### RMSE_xgb1
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history3_xgb1,"rmse")
+```
+
+#### ERROR_xgb1
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history3_xgb1,"error")
+```
+
+
+
+### 3.3 NA Feature
+```{r data4 na_feature, eval=FALSE, include=FALSE}
+#colnames(data3)
+na_swipal=select(data3,c(ABODE_STATE_Value:APPLY_COUNT_Value,CALL_RECORD_FLAG_Value:REJECT_COUNT_Value,WORK_DAY_Value:GENDER_Value_ID_CARD))%>%
+  apply(1,function(x)sum(is.na(x)))
+na_3party=select(data3,BR_CARD_INDEX_Value:BR_M6_DEBIT_IN_Value,TD_FINAL_SCORE_Value)%>%apply(1,function(x)sum(is.na(x)))
+na_all=apply(data3,1,function(x)sum(is.na(x)))
+
+data4=data3%>%
+  mutate(na_swipal=na_swipal,na_3party=na_3party,na_all=na_all)
+#head(data4)
+```
+
+```{r na_distribution, eval=FALSE, include=FALSE}
+na=data.table(select(data4,c(na_all,y)))
+na=na[order(na$na_all,na$y,decreasing = T)]
+na$id=1:134025
+ggplot(na,aes(x=id,y=na_all))+
+  geom_point()+
+  xlab("Sample")+
+  ylab("num of NA")+
+  theme(axis.text.x=element_blank())
+```
+
+```{r delete 16NA, eval=FALSE, include=FALSE}
+data4=data4%>%
+  data.table%>%
+  filter(na_all!=16)
+
+```
+
+### Data4
+- 增加三个NA数量标签
+- 删除NA极端点(6个离群样本)
+
+
+```{r xgb2 with new feature, eval=FALSE, include=FALSE}
+train=select(data4,-c(y,CONTACT_ADDRESS_DETAIL_Value,ext_id,hx_id,creation_date,ABODE_STATE_Value,ID_CARD))
+train$GENDER_Value_ID_CARD=ifelse(train$GENDER_Value_ID_CARD=="M",1,0)
+train=apply(train,2,as.numeric)%>%as.matrix()
+labels=as.numeric(data4$y)%>%as.matrix()
+dtrain <- xgb.DMatrix(train, label = data4$y,missing=NA)
+
+xgb2 <- xgboost(data = train, label=data4$y%>%as.matrix,max.depth = 4,missing=NA,  
+               eta = 1, nthread = 2, nround = 10,objective = "binary:logistic") 
+
+
+save(xgb2,file="model//xgb2.RData")
+save(dtrain,file="data//dtrain_data4.RData")
+save(train,file="data//train_data4.RData")
+save(data4,file="data//data4.RData")
+```
+
+### Run XGB2 with our NEW FEATURE{.tabset}
+```{r xgb2, echo=FALSE, message=FALSE, warning=FALSE}
+load("model//xgb2.RData")
+load("data//train_data4.RData")
+load("data//data4.RData")
+y_hat=predict(xgb2,newdata=train,missing=NA)
+ks.test(y_hat[which(data4$y==1)],y_hat[which(data4$y==0)])
+```
+
+
+```{r data4-->history4, eval=FALSE, include=FALSE}
+history4 <- xgb.cv(data = train, label=as.matrix(data4$y),missing=NA,nround=100, nthread = 2, nfold = 10, metrics=list("auc","rmse","error"),
+                  max.depth =6, eta = 1, objective = "binary:logistic")
+history4=history4%>%data.frame
+save(history4,file="data//history4.RData")
+```
+
+
+```{r data4-->history4_ks, eval=FALSE, include=FALSE}
+ks=function(pres,dtrain){
+  labels <- getinfo(dtrain, "label")
+  a=ks.test(pres[which(labels==1)],pres[which(labels==0)])
+  return(list(metric = "ks", value = a$statistic))
+}
+history4_ks=xgb.cv(data = train, label=as.matrix(data4$y),missing=NA,nround=100, nthread = 2, nfold = 10,
+      feval=ks,max.depth =6, eta = 1, objective = "binary:logistic")
+history4_ks=history4_ks%>%data.frame
+save(history4_ks,file="data//history4_ks.RData")
+```
+
+
+```{r history4 plot, echo=FALSE, message=FALSE, warning=FALSE}
+load("data//history4.RData")
+load("data//history4_ks.RData")
+```
+#### AUC
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history4,"auc")
+```
+
+#### RMSE
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history4,"rmse")
+```
+
+#### ERROR
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history4,"error")
+```
+
+#### KS
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+xgb.cv.plot(history4_ks,"ks")
+```
+
+
+
+
+
+
+
+
+
+
+### Importance of feature{.tabset}
+#### All Feature
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#Because the index is extracted from the model dump (made on the C++ side), it starts at 0 (usual in C++) instead of 1 (usual in R).
+importanceRaw <- xgb.importance(feature_names=colnames(train), model = xgb2)
+
+#ggplot(importanceRaw,aes(x=reorder(Feature,Gain),y=Gain))+
+#  geom_bar(stat="identity",fill="red")+
+#  theme(axis.text.x= element_text(angle = 90,hjust = 1),axis.title.x=NULL)+
+#  theme_dark()+
+#  xlab(NULL)+
+#  ylab(NULL)+
+#  labs(title="importance of feature")+
+#  coord_flip()
+
+
+xgb.plot.importance(importanceRaw)
+
+```
+
+
+
+
+
+
+
+
+
+
+

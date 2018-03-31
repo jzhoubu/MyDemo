@@ -1,0 +1,212 @@
+---
+title: "redata1"
+author: "Garvey"
+date: "2017年6月2日"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+```{r library}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(stringr)
+library(DT)
+
+```
+
+```{r get data0, eval=FALSE, include=FALSE}
+library(RMySQL)
+con <- dbConnect(MySQL(),host="119.23.143.48",dbname="ODS_TEST",user="zhoujiawei",password="zjw&&2017")  
+dbGetQuery(con,"set names gbk")
+data0=dbGetQuery(con,"SELECT * FROM ODS_TEST.Model_BASE_User_APPROVAL_EXT_Info")
+dbDisconnect(con)
+save(data0,file="data0.RData")
+
+```
+
+# Peek at the data
+```{r, result='asis',echo=F}
+load("data//data0.RData")
+datatable(head(data0,100),style="bootstrap",class="table-condensed",options = list(dom = 'tp',scrollX = T))
+```
+
+<br />
+
+# Basic Cleaning
+## Data
+- 转换日期格式
+- 删除overdue_days为NA的数据(212908-->212662)
+```{r create data, eval=FALSE, include=FALSE}
+data=data0
+data$creation_date=as.Date(data0$creation_date,format='%Y-%m-%d')
+data$WORK_TIME_Value=as.Date(data0$WORK_TIME_Value,format='%Y-%m-%d')
+data=data[complete.cases(data$overdue_days),]
+
+save(data,file="data//data.RData")
+```
+
+```{r load_data}
+load("data//data.RData")
+```
+
+<br />
+
+# Check NA
+```{r Check NA, message=FALSE, warning=FALSE, include=FALSE}
+check_na=function(data0){
+  missing=sapply(data0,function(x)sum(is.na(x))/nrow(data0))
+  missing=missing[order(missing,decreasing = T)]
+  nadata=missing[missing>0]
+  na_df=data.frame(var=names(nadata),na=nadata,row.names = NULL)
+  ggplot(na_df)+
+    geom_bar(aes(x=reorder(var,na),y=na),stat='identity', fill='red')+
+    labs(y='% Missing',x=NULL,title='Percent of Missing Data by Feature') +
+    coord_flip(ylim = c(0,1))  
+}
+```  
+
+
+```{r, echo=TRUE}
+check_na(data)
+```
+
+<br />
+
+# Drop the feature with NA over 75%
+```{r DROP_List, eval=FALSE, include=FALSE}
+missing=sapply(data,function(x)sum(is.na(x))/nrow(data))
+cut_names=names(missing[missing>0.75])
+a=''
+for(i in 1:length(cut_names)){
+  a=paste0(a,cut_names[i],seq=',')
+} 
+a
+```
+
+## Data1
+- 追加y变量(1 for bad,0 for good)
+- 删除NA大于75%的字段
+- 删除OVERDUE_REPAY_DAYS_Value,overdue_days,overdue_unrepay_days字段
+- 删除GENDER_Value字段
+- 删除overdue_days<0的样本(212908-->134025)
+
+
+```{r Create data1, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+data$overdue_days=as.numeric(data$overdue_days)
+
+data1=data
+data1=data1%>%
+  mutate(y=ifelse(data$overdue_days>30,1,0))%>%
+  filter(overdue_days>=0)%>%
+  select(-c(ACM_M16M18_CREDIT_DEF_Value,ACM_M1_DEBIT_BALANCE_Value,ACM_M3_DEBIT_BALANCE_Value,ACM_M7M9_CREDIT_DEF_Value,
+            CREDIT_CARD_FLAG_Value,LBS_ADDRESS_Value,MULTIPLE_LOAN_D7_COUNT_Value,MULTIPLE_LOAN_M1_COUNT_Value,
+            MULTIPLE_LOAN_M3_COUNT_Value,USER_EMAIL_Value,WHITE_CREDIT_Value))%>%
+  select(-c(OVERDUE_REPAY_DAYS_Value,overdue_days,overdue_unrepay_days))%>%
+  select(-GENDER_Value)
+#save(data1,file="data//data1.RData")
+
+```
+
+
+```{r check_na for data1, message=FALSE, warning=FALSE}
+load("data//data1.RData")
+check_na(data1)
+```
+
+<br />
+
+# Detailed Data Cleaning{.tabset}
+
+```{r Definition bar_plot, message=FALSE, warning=FALSE, include=FALSE}
+bar=function(var){
+  var_num=table(var)%>%data.frame()
+  na_num=data.frame(var='NA',Freq=sum(is.na(var)))
+  df=rbind(na_num,var_num)
+
+  plot=ggplot(df)+
+    geom_bar(aes(x=var,y=Freq),fill='red',stat="identity")
+  return(plot)
+}
+```
+
+```{r Definition bar1_plot, message=FALSE, warning=FALSE, include=FALSE}
+bar_data1=function(var,plot=T){
+ y1=data1$y
+  a=cbind(var,y1)
+  a=data.table(a)
+  df=a[,.N,by=.(var,y1)]
+  df$var[is.na(df$var)]=-1
+  df$var=factor(df$var)
+  levels(df$var)=df$var%>%levels%>%as.numeric%>%sort
+  df=df[order(y1,var)]
+
+  if(plot==T){
+  plot1=ggplot(df,aes(x=var,y=N,fill=y1))+
+    geom_bar(stat='identity')
+  return(plot1)
+  }
+  
+  else{
+    good=df[y1==0]
+    bad=df[y1==1]
+    df1=merge(good,bad,all=T,by='var')
+    
+    df1=mutate(df1,'good%'=N.x/(N.x+N.y))
+    return(df1)
+    } 
+}
+```
+
+
+## TEL_PERIOD_Value
+```{r TEL_PERIOD_Value, message=FALSE, warning=FALSE}
+bar(data1$TEL_PERIOD_Value)
+bar_data1(data1$TEL_PERIOD_Value)
+
+bar_data1(data1$TEL_PERIOD_Value,plot=F)
+
+
+```
+
+
+
+## BR_FINAL_SCORE_Value
+```{r BR_FINAL_SCORE_Value, message=FALSE, warning=FALSE}
+
+bar(data1$BR_FINAL_SCORE_Value)
+bar_data1(data1$BR_FINAL_SCORE_Value)
+
+```
+
+
+
+## TD_FINAL_SCORE_Value
+```{r TD_FINAL_SCORE_Value, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+bar(data1$TD_FINAL_SCORE_Value)
+bar1(data1$TD_FINAL_SCORE_Value)
+
+bar1(data1$TD_FINAL_SCORE_Value,plot=F)
+
+
+```
+
+
+```{r}
+
+
+
+```
+
+
+
+
+
